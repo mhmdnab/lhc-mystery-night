@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0a0b">
+<meta name="robots" content="noindex">
+<title>Mystery Night Host</title>
+<link rel="icon" href="logo.jpg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Arabic:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+<style>
+  .host-grid { display: grid; gap: 22px; padding-top: 26px; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; }
+  .controls .grow { margin-right: auto; display: grid; gap: 8px; }
+  .qr-box { display: grid; justify-items: center; gap: 14px; padding: 28px; background: #fff; color: #111; border-radius: var(--r); max-width: 460px; margin: 0 auto; }
+  .qr-box #qr img, .qr-box #qr canvas { width: min(360px, 70vw) !important; height: auto !important; }
+  .qr-box .url { font-family: var(--font-mono); font-size: 18px; word-break: break-all; text-align: center; }
+  .confirm-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 16px; border: 1px solid var(--red); border-radius: var(--r); background: color-mix(in srgb, var(--red) 12%, var(--panel)); }
+  .confirm-inline p { margin: 0 auto 0 0; }
+  .answer-key { font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="top gutter">
+  <div class="wrap top-inner">
+    <div class="badge"><img src="logo.jpg" alt="Lebanese Heritage Club"></div>
+    <div class="title-block">
+      <span class="eyebrow">Lebanese Heritage Club · AUB · Host</span>
+      <h1><span class="r">Mystery</span> <span class="g">Night</span></h1>
+      <div class="title-meta"><span class="pill" id="pill">Host</span><span class="tagline" lang="ar" dir="rtl">حلّ اللغز، اضحك، وجرّب حظك بالقرعة</span></div>
+    </div>
+  </div>
+</header>
+<main class="gutter"><div class="wrap" id="app"></div></main>
+<div class="dome" aria-hidden="true"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="config.js"></script>
+<script>
+(function () {
+  const { SUPABASE_URL, SUPABASE_KEY } = window.MN_CONFIG;
+  const PIN_KEY = "lhc-mn-host-pin";
+  const app = document.getElementById("app");
+  const pill = document.getElementById("pill");
+  const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const fmt = t => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const joinUrl = location.origin + location.pathname.replace(/host(\.html)?$/, "");
+
+  let pin = null;
+  try { pin = sessionStorage.getItem(PIN_KEY) || localStorage.getItem(PIN_KEY); } catch (e) {}
+  let data = null, lastJson = "";
+  let ui = { err: "", busy: false, confirm: null, showQr: false, netErr: false };
+
+  async function rpc(fn, args) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+      method: "POST", headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" }, body: JSON.stringify(args)
+    });
+    let d = null; try { d = await r.json(); } catch (e) {}
+    if (!r.ok) { const e = new Error((d && d.message) || "Request failed."); e.server = true; throw e; }
+    return d;
+  }
+
+  function viewPin() {
+    return `<div class="narrow host-grid">
+      <form class="panel stack" id="pin-form" novalidate>
+        <h2 style="font-size:44px">Host sign-in</h2>
+        <div><label class="label" for="pin">Host PIN</label><input class="field" id="pin" inputmode="numeric" autocomplete="off" placeholder="6-digit PIN"></div>
+        ${ui.err ? `<p class="err" role="alert">${esc(ui.err)}</p>` : ""}
+        <button class="btn btn-primary btn-lg" type="submit"${ui.busy ? " disabled" : ""}>${ui.busy ? "Checking…" : "Open host screen"}</button>
+        <p class="note">Teams play at <strong>${esc(joinUrl)}</strong></p>
+      </form></div>`;
+  }
+
+  function confirmBox() {
+    const c = ui.confirm; if (!c) return "";
+    return `<div class="confirm-inline" role="alert"><p>${c.text}</p>
+      ${c.choices.map(ch => `<button class="btn ${ch.cls || ""}" data-run="${ch.id}">${esc(ch.label)}</button>`).join("")}
+      <button class="btn btn-ghost" data-act="cancel">Cancel</button></div>`;
+  }
+
+  function viewDash() {
+    const d = data;
+    const teams = d.teams;
+    const st = d.stage;
+    const answered = st ? teams.filter(t => t.answers.some(a => a.stage === st)).length : 0;
+    const keyNow = st ? (d.key.find(k => k.stage === st) || {}).suspect : null;
+    const statusText = d.status === "lobby" ? "Waiting to start" : d.status === "finished" ? "Finished · ranks shown" : `Stage ${st} open`;
+    pill.textContent = statusText;
+
+    if (ui.showQr) {
+      return `<div class="host-grid"><div class="qr-box"><strong style="font-family:var(--font-display);font-size:34px;text-transform:uppercase">Scan to join</strong>
+        <div id="qr"></div><div class="url">${esc(joinUrl)}</div></div>
+        <div style="text-align:center"><button class="btn" data-act="qr">Back to host screen</button></div></div>`;
+    }
+
+    let main;
+    if (d.status === "lobby") main = `<button class="btn btn-primary btn-lg" data-act="open" data-stage="1">Open stage 1</button>`;
+    else if (d.status === "playing" && st < 5) main = `<button class="btn btn-primary btn-lg" data-act="open" data-stage="${st + 1}">Open stage ${st + 1}</button>`;
+    else if (d.status === "playing") main = `<button class="btn btn-primary btn-lg" data-act="finish">End game · show ranks</button>`;
+    else main = `<span class="pulse">Every phone now shows its team's rank</span>`;
+
+    const steps = [1, 2, 3, 4, 5].map(s => `<button class="btn${d.status === "playing" && s === st ? " now" : s < st || d.status === "finished" ? " done" : ""}" data-act="open" data-stage="${s}" title="Open stage ${s}">${s}</button>`).join("");
+
+    const rows = teams.map(t => {
+      const cells = [1, 2, 3, 4, 5].map(s => {
+        const a = t.answers.find(x => x.stage === s);
+        if (!a) return `<td><span class="meta" style="color:var(--muted)">–</span></td>`;
+        return `<td><div class="cell"><span class="who">${esc(a.suspect)}</span>
+          <span class="meta">#${a.order} · ${fmt(a.at)}</span>
+          <span><span class="tag ${a.correct ? "ok" : "no"}">${a.correct ? "✓ +" + a.points : "✗ 0"}</span></span>
+          <button class="x" data-act="void" data-team="${t.id}" data-stage="${s}" data-name="${esc(t.name)}">undo</button></div></td>`;
+      }).join("");
+      return `<tr><td>${t.rank}</td>
+        <td><strong>${esc(t.name)}</strong><div class="members" style="font-size:12px">${t.members.map(esc).join(" · ")}</div>
+          <button class="x" data-act="remove" data-team="${t.id}" data-name="${esc(t.name)}">remove team</button></td>
+        ${cells}<td class="n total">${t.total}</td></tr>`;
+    }).join("");
+
+    return `<div class="host-grid">
+      ${ui.netErr ? `<div class="banner">Connection lost. Retrying…</div>` : ""}
+      ${ui.err ? `<div class="banner">${esc(ui.err)}</div>` : ""}
+      <div class="kpis">
+        <div class="kpi"><span class="eyebrow">Status</span><b>${esc(statusText)}</b></div>
+        <div class="kpi"><span class="eyebrow">Teams</span><b>${teams.length}</b></div>
+        ${st && d.status !== "lobby" ? `<div class="kpi"><span class="eyebrow">Answered stage ${st}</span><b>${answered} / ${teams.length}</b></div>
+        <div class="kpi"><span class="eyebrow">Stage ${st} answer</span><b style="font-size:24px;line-height:1.2">${esc(keyNow)}</b></div>` : ""}
+      </div>
+      <div class="panel controls">
+        <div class="grow"><span class="eyebrow">Stages</span><div class="steps">${steps}</div></div>
+        ${main}
+        <button class="btn" data-act="qr">Show join QR</button>
+      </div>
+      ${confirmBox()}
+      <section>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+          <h3 style="font-size:30px">Teams and answers</h3><span class="note">Only you see this. Teams never see points or right/wrong.</span></div>
+        ${teams.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Rank</th><th>Team</th>${[1,2,3,4,5].map(s => `<th>Stage ${s}</th>`).join("")}<th class="n">Total</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+          : `<div class="panel"><p class="note" style="margin:0">No teams yet. Teams register by opening <strong>${esc(joinUrl)}</strong> on one phone per team.</p></div>`}
+      </section>
+      <div class="panel controls">
+        <div class="grow"><span class="eyebrow">Start over</span><span class="note">Use this after a test run. Played answers are archived, not shown.</span></div>
+        <button class="btn btn-danger" data-act="reset">New game</button>
+        <button class="btn btn-ghost" data-act="signout">Sign out</button>
+      </div>
+      <p class="answer-key">Answer key: ${d.key.map(k => `S${k.stage} ${esc(k.suspect)}`).join(" · ")}</p>
+    </div>`;
+  }
+
+  function render() {
+    if (!pin || !data) { pill.textContent = "Host"; app.innerHTML = viewPin(); return; }
+    app.innerHTML = viewDash();
+    if (ui.showQr && window.QRCode) {
+      new QRCode(document.getElementById("qr"), { text: joinUrl, width: 720, height: 720, correctLevel: QRCode.CorrectLevel.M });
+    }
+  }
+
+  async function refresh(force) {
+    if (!pin) return;
+    try {
+      const d = await rpc("host_state", { p_pin: pin });
+      const j = JSON.stringify(d);
+      const wasNet = ui.netErr; ui.netErr = false;
+      if (force || j !== lastJson || wasNet) { data = d; lastJson = j; if (!ui.showQr || !document.getElementById("qr")) render(); }
+    } catch (e) {
+      if (e.server && /PIN/i.test(e.message)) { pin = null; data = null; try { sessionStorage.removeItem(PIN_KEY); localStorage.removeItem(PIN_KEY); } catch (x) {} ui.err = e.message; render(); return; }
+      if (!ui.netErr) { ui.netErr = true; render(); }
+    }
+  }
+
+  async function run(fn, args) {
+    ui.busy = true; ui.err = ""; ui.confirm = null;
+    try { await rpc(fn, Object.assign({ p_pin: pin }, args)); }
+    catch (e) { ui.err = e.server ? e.message : "Couldn't reach the server. Try again."; }
+    ui.busy = false; lastJson = ""; await refresh(true); render();
+  }
+
+  app.addEventListener("submit", async e => {
+    if (e.target.id !== "pin-form") return;
+    e.preventDefault();
+    const v = document.getElementById("pin").value.trim();
+    if (!v) return;
+    ui.busy = true; ui.err = ""; render();
+    try {
+      data = await rpc("host_state", { p_pin: v });
+      pin = v; lastJson = JSON.stringify(data);
+      try { sessionStorage.setItem(PIN_KEY, v); localStorage.setItem(PIN_KEY, v); } catch (x) {}
+    } catch (err) { ui.err = err.server ? err.message : "Couldn't reach the server. Try again."; }
+    ui.busy = false; render();
+  });
+
+  const pending = {};
+  app.addEventListener("click", e => {
+    const r = e.target.closest("[data-run]");
+    if (r) { const f = pending[r.dataset.run]; if (f) f(); return; }
+    const b = e.target.closest("[data-act]");
+    if (!b || b.disabled) return;
+    const act = b.dataset.act;
+    const ask = (text, choices) => {
+      Object.keys(pending).forEach(k => delete pending[k]);
+      ui.confirm = { text, choices: choices.map((c, i) => { pending["c" + i] = c.go; return { id: "c" + i, label: c.label, cls: c.cls }; }) };
+      render();
+    };
+    if (act === "cancel") { ui.confirm = null; render(); }
+    else if (act === "qr") { ui.showQr = !ui.showQr; render(); }
+    else if (act === "signout") { pin = null; data = null; try { sessionStorage.removeItem(PIN_KEY); localStorage.removeItem(PIN_KEY); } catch (x) {} render(); }
+    else if (act === "open") {
+      const s = +b.dataset.stage;
+      if (data.status === "playing" && data.stage === s) return;
+      ask(`Open <strong>stage ${s}</strong>? Every phone moves to clue ${s}${data.stage ? ` and stage ${data.stage} closes` : ""}.`,
+        [{ label: `Open stage ${s}`, cls: "btn-primary", go: () => run("host_set_stage", { p_stage: s }) }]);
+    }
+    else if (act === "finish") ask("End the game? Every phone will show its team's final rank.", [{ label: "End game", cls: "btn-primary", go: () => run("host_finish", {}) }]);
+    else if (act === "void") ask(`Undo <strong>${esc(b.dataset.name)}</strong>'s stage ${b.dataset.stage} answer? They can answer again while that stage is open.`,
+        [{ label: "Undo answer", cls: "btn-danger", go: () => run("host_void_answer", { p_team: b.dataset.team, p_stage: +b.dataset.stage }) }]);
+    else if (act === "remove") ask(`Remove team <strong>${esc(b.dataset.name)}</strong> from the game?`,
+        [{ label: "Remove team", cls: "btn-danger", go: () => run("host_remove_team", { p_team: b.dataset.team }) }]);
+    else if (act === "reset") ask("Start a new game? All answers are cleared from the game.",
+        [{ label: "Keep the teams", go: () => run("host_new_game", { p_keep_teams: true }) },
+         { label: "Clear teams too", cls: "btn-danger", go: () => run("host_new_game", { p_keep_teams: false }) }]);
+  });
+
+  render();
+  refresh(true);
+  setInterval(() => { if (!document.hidden && !ui.busy && !ui.confirm) refresh(); }, 3000);
+})();
+</script>
+</body>
+</html>
