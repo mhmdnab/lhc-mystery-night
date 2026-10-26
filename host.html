@@ -52,7 +52,8 @@
   let pin = null;
   try { pin = sessionStorage.getItem(PIN_KEY) || localStorage.getItem(PIN_KEY); } catch (e) {}
   let data = null, lastJson = "";
-  let ui = { err: "", busy: false, confirm: null, showQr: false, netErr: false };
+  let ui = { err: "", busy: false, confirm: null, showQr: false, netErr: false, pinMsg: null, pinBusy: false };
+  let pinDraft = { a: "", b: "" };
 
   async function rpc(fn, args) {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
@@ -147,6 +148,16 @@
         <button class="btn btn-danger" data-act="reset">New game</button>
         <button class="btn btn-ghost" data-act="signout">Sign out</button>
       </div>
+      <form class="panel stack" id="pin-change" novalidate style="max-width:560px">
+        <div><span class="eyebrow">Host PIN</span>
+          <p class="note" style="margin-top:4px">Change the PIN that opens this page. Any other device signed in as host will need the new PIN.</p></div>
+        <div><label class="label" for="np1">New PIN</label>
+          <input class="field" id="np1" data-np="a" type="password" autocomplete="new-password" maxlength="20" placeholder="4 to 20 characters" value="${esc(pinDraft.a)}"></div>
+        <div><label class="label" for="np2">Repeat new PIN</label>
+          <input class="field" id="np2" data-np="b" type="password" autocomplete="new-password" maxlength="20" value="${esc(pinDraft.b)}"></div>
+        ${ui.pinMsg ? `<p class="${ui.pinMsg.ok ? "ok" : "err"}" role="status" style="margin:0;font-weight:500">${esc(ui.pinMsg.text)}</p>` : ""}
+        <div><button class="btn btn-primary" type="submit"${ui.pinBusy ? " disabled" : ""}>${ui.pinBusy ? "Saving…" : "Change PIN"}</button></div>
+      </form>
       <p class="answer-key">Answer key: ${d.key.map(k => `S${k.stage} ${esc(k.suspect)}`).join(" · ")}</p>
     </div>`;
   }
@@ -178,6 +189,31 @@
     catch (e) { ui.err = e.server ? e.message : "Couldn't reach the server. Try again."; }
     ui.busy = false; lastJson = ""; await refresh(true); render();
   }
+
+  app.addEventListener("input", e => {
+    const k = e.target.dataset.np;
+    if (k) pinDraft[k] = e.target.value;
+  });
+
+  app.addEventListener("submit", async e => {
+    if (e.target.id !== "pin-change") return;
+    e.preventDefault();
+    const a = pinDraft.a.trim(), b = pinDraft.b.trim();
+    if (a.length < 4 || a.length > 20) { ui.pinMsg = { ok: false, text: "The new PIN must be 4 to 20 characters." }; render(); return; }
+    if (/\s/.test(a)) { ui.pinMsg = { ok: false, text: "The new PIN can't contain spaces." }; render(); return; }
+    if (a !== b) { ui.pinMsg = { ok: false, text: "The two PINs don't match." }; render(); return; }
+    ui.pinBusy = true; ui.pinMsg = null; render();
+    try {
+      await rpc("host_change_pin", { p_pin: pin, p_new_pin: a });
+      pin = a;
+      try { sessionStorage.setItem(PIN_KEY, a); localStorage.setItem(PIN_KEY, a); } catch (x) {}
+      pinDraft = { a: "", b: "" };
+      ui.pinMsg = { ok: true, text: "PIN changed. Use the new PIN from now on." };
+    } catch (err) {
+      ui.pinMsg = { ok: false, text: err.server ? err.message : "Couldn't reach the server. Try again." };
+    }
+    ui.pinBusy = false; render();
+  });
 
   app.addEventListener("submit", async e => {
     if (e.target.id !== "pin-form") return;
